@@ -65,6 +65,13 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Ensure Gradle Wrapper JAR exists
+        run: |
+          mkdir -p gradle/wrapper
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ] || [ ! -s "gradle/wrapper/gradle-wrapper.jar" ]; then
+            curl -sSL -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradle/wrapper/gradle-wrapper.jar
+          fi
+
       - name: Grant Execute Permission to Gradlew & Scripts
         run: |
           chmod +x gradlew
@@ -387,6 +394,15 @@ object TapsellManager {
             >
               <Download className="w-4 h-4" />
               <span>دانلود Keystore</span>
+            </a>
+
+            <a
+              href="/gradle-wrapper.jar"
+              download="gradle-wrapper.jar"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
+            >
+              <FileArchive className="w-3.5 h-3.5 text-emerald-400" />
+              <span>دانلود gradle-wrapper.jar</span>
             </a>
 
             <a

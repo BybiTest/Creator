@@ -23,6 +23,15 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
+      - name: Ensure Gradle Wrapper JAR exists
+        run: |
+          mkdir -p gradle/wrapper
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ] || [ ! -s "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "📥 gradle-wrapper.jar not found or empty. Downloading official Gradle Wrapper JAR..."
+            curl -sSL -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradle/wrapper/gradle-wrapper.jar
+          fi
+          ls -lh gradle/wrapper/gradle-wrapper.jar
+
       - name: Grant Execute Permission to Gradlew & Scripts
         run: |
           chmod +x gradlew
