@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -36,14 +36,6 @@ jobs:
         run: |
           chmod +x gradlew
           chmod +x scripts/bundle-signer.sh || true
-
-      - name: Validate PNG Resources
-        run: |
-          for img in app/src/main/res/mipmap-*/*.png; do
-            if [ -f "$img" ]; then
-              file "$img"
-            fi
-          done
 
       - name: Prepare Release Keystore
         env:
@@ -68,53 +60,47 @@ jobs:
           ls -lh signing/release.keystore
 
       - name: Build Release APK
-        run: |
-          ./gradlew assembleRelease --stacktrace
+        run: ./gradlew assembleRelease --stacktrace
 
-      - name: Build Release Bundle
-        run: |
-          ./gradlew bundleRelease --stacktrace
+      - name: Build Release Bundle (AAB)
+        run: ./gradlew bundleRelease --stacktrace
 
       - name: Build Debug APK
-        run: |
-          ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace
 
-      - name: Sign Release Files
+      - name: Sign Release APK and AAB
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
         run: |
-          mkdir -p app/build/outputs/bundle/release
-          mkdir -p app/build/outputs/apk/release
-
           cp app/build/outputs/bundle/release/app-release.aab \
           app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
 
           jarsigner \
-          -verbose \
-          -sigalg SHA256withRSA \
-          -digestalg SHA-256 \
-          -keystore signing/release.keystore \
-          -storepass "$KEYSTORE_PASSWORD" \
-          -keypass "$KEY_PASSWORD" \
-          app/build/outputs/bundle/release/CreatorFlow-release-signed.aab \
-          "$KEY_ALIAS"
+            -verbose \
+            -sigalg SHA256withRSA \
+            -digestalg SHA-256 \
+            -keystore signing/release.keystore \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            app/build/outputs/bundle/release/CreatorFlow-release-signed.aab \
+            "$KEY_ALIAS"
 
-          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n1)
+          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
 
           cp "$APK_FILE" app/build/outputs/apk/release/CreatorFlow-release-signed.apk
 
           jarsigner \
-          -verbose \
-          -sigalg SHA256withRSA \
-          -digestalg SHA-256 \
-          -keystore signing/release.keystore \
-          -storepass "$KEYSTORE_PASSWORD" \
-          -keypass "$KEY_PASSWORD" \
-          app/build/outputs/apk/release/CreatorFlow-release-signed.apk \
-          "$KEY_ALIAS"
-                - name: Generate Cafe Bazaar Bundle Signer BIN
+            -verbose \
+            -sigalg SHA256withRSA \
+            -digestalg SHA-256 \
+            -keystore signing/release.keystore \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            app/build/outputs/apk/release/CreatorFlow-release-signed.apk \
+            "$KEY_ALIAS"
+                  - name: Generate Cafe Bazaar Bundle Signer BIN
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
@@ -124,38 +110,32 @@ jobs:
 
           mkdir -p signing
 
-          echo "📥 Finding Cafe Bazaar Bundle Signer..."
+          echo "📥 Downloading Cafe Bazaar Bundle Signer..."
 
           RELEASE_JSON=$(curl -s https://api.github.com/repos/cafebazaar/bundle-signer/releases/latest)
 
           DOWNLOAD_URL=$(echo "$RELEASE_JSON" | \
-          grep browser_download_url | \
-          grep -E "\.jar" | \
-          head -n 1 | \
-          cut -d '"' -f 4)
+            grep browser_download_url | \
+            grep -E "\.jar" | \
+            head -n 1 | \
+            cut -d '"' -f 4)
 
           if [ -z "$DOWNLOAD_URL" ]; then
-            echo "❌ Could not find Bundle Signer JAR"
+            echo "❌ Bundle Signer JAR not found"
             exit 1
           fi
 
-          echo "Downloading:"
-          echo "$DOWNLOAD_URL"
+          curl -fL "$DOWNLOAD_URL" -o /tmp/bundlesigner.jar
 
-          curl -fL "$DOWNLOAD_URL" \
-          -o /tmp/bundlesigner.jar
-
-          echo "Checking JAR..."
-
+          echo "Checking downloaded signer..."
           file /tmp/bundlesigner.jar
 
           if ! file /tmp/bundlesigner.jar | grep -qi "Java archive"; then
-            echo "❌ Invalid JAR file"
+            echo "❌ Invalid Bundle Signer file"
             exit 1
           fi
 
-
-          echo "⚡ Creating Cafe Bazaar BIN..."
+          echo "⚡ Generating Bazaar BIN..."
 
           java -jar /tmp/bundlesigner.jar genbin \
             --bundle app/build/outputs/bundle/release/CreatorFlow-release-signed.aab \
@@ -165,34 +145,26 @@ jobs:
             --key-pass "pass:$KEY_PASSWORD" \
             --ks-key-alias "$KEY_ALIAS"
 
-
-          BAZAAR_BIN=$(find signing -name "*.bin" | head -n1)
-
+          BAZAAR_BIN=$(find signing -maxdepth 1 -name "*.bin" | head -n 1)
 
           if [ -z "$BAZAAR_BIN" ]; then
-            echo "❌ BIN was not created"
+            echo "❌ No BIN file generated"
             exit 1
           fi
-
 
           cp "$BAZAAR_BIN" signing/bazaar_bundle_signer.bin
 
-
           SIZE=$(stat -c%s signing/bazaar_bundle_signer.bin)
 
-          echo "BIN SIZE:"
-          echo "$SIZE bytes"
-
+          echo "BIN size: $SIZE bytes"
 
           if [ "$SIZE" -lt 10000 ]; then
-            echo "❌ BIN size is invalid"
+            echo "❌ BIN is too small"
             exit 1
           fi
 
-
-          echo "✅ Cafe Bazaar BIN generated"
+          echo "✅ Bazaar BIN created successfully"
           ls -lh signing/bazaar_bundle_signer.bin
-
 
 
       - name: Upload Universal Signed APK
@@ -203,7 +175,7 @@ jobs:
           if-no-files-found: error
 
 
-      - name: Upload Signed AAB
+      - name: Upload Signed Release AAB
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-Signed-Release-AAB
@@ -219,7 +191,7 @@ jobs:
           if-no-files-found: error
 
 
-      - name: Upload Release Keystore Backup
+      - name: Upload Release Keystore
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-Release-Keystore
