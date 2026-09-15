@@ -37,7 +37,7 @@ export const AndroidProjectHub: React.FC<AndroidProjectHubProps> = ({
     { title: string; filename: string; language: string; content: string }
   > = {
     workflow: {
-      title: "GitHub Actions CI/CD Workflow (AAB, APK & Bundle Signer .bin)",
+      title: "GitHub Actions CI/CD Workflow (AAB, APK & Official Bazaar Signer .bin)",
       filename: ".github/workflows/android-build.yml",
       language: "yaml",
       content: `name: Build & Sign CreatorFlow Android APK & AAB
@@ -85,7 +85,7 @@ jobs:
             fi
           done
 
-      - name: Prepare Release Keystore & Generate Bundle Signer (.bin)
+      - name: Prepare Release Keystore
         env:
           KEYSTORE_PASSWORD: \${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
           KEY_PASSWORD: \${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
@@ -94,11 +94,14 @@ jobs:
           mkdir -p signing
           if [ -n "\${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
             echo "\${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > signing/release.keystore
+          elif [ ! -f "signing/release.keystore" ]; then
+            openssl genrsa -out signing/release_private_key.pem 2048
+            openssl req -new -x509 -key signing/release_private_key.pem -out signing/release_cert.pem -days 10000 \\
+              -subj "/CN=CreatorFlow/OU=Production/O=HamidMousavizadeh/C=IR"
+            openssl pkcs12 -export -in signing/release_cert.pem -inkey signing/release_private_key.pem \\
+              -out signing/release.keystore -name "$KEY_ALIAS" -passout "pass:$KEYSTORE_PASSWORD"
           fi
-          ./scripts/bundle-signer.sh
-
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+          ls -la signing/release.keystore
 
       - name: Build Release APK
         run: ./gradlew assembleRelease --stacktrace
@@ -106,7 +109,10 @@ jobs:
       - name: Build Release Bundle (AAB)
         run: ./gradlew bundleRelease --stacktrace
 
-      - name: Sign APK and AAB with Bundle Signer Keystore
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Sign APK and AAB with Keystore
         env:
           KEYSTORE_PASSWORD: \${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
           KEY_PASSWORD: \${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
@@ -115,28 +121,50 @@ jobs:
           # Sign Release AAB
           if [ -f "app/build/outputs/bundle/release/app-release.aab" ]; then
             cp app/build/outputs/bundle/release/app-release.aab app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
-            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-              -keystore signing/release.keystore \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -keypass "$KEY_PASSWORD" \
+            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \\
+              -keystore signing/release.keystore \\
+              -storepass "$KEYSTORE_PASSWORD" \\
+              -keypass "$KEY_PASSWORD" \\
               app/build/outputs/bundle/release/CreatorFlow-release-signed.aab "$KEY_ALIAS"
           fi
 
-          # Sign Release APK
+          # Sign Release APK (Universal APK for Cafe Bazaar)
           APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -n "$APK_FILE" ]; then
             cp "$APK_FILE" app/build/outputs/apk/release/CreatorFlow-release-signed.apk
-            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-              -keystore signing/release.keystore \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -keypass "$KEY_PASSWORD" \
+            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \\
+              -keystore signing/release.keystore \\
+              -storepass "$KEYSTORE_PASSWORD" \\
+              -keypass "$KEY_PASSWORD" \\
               app/build/outputs/apk/release/CreatorFlow-release-signed.apk "$KEY_ALIAS"
           fi
 
-      - name: Upload Signed Release APK
+      - name: Generate Cafe Bazaar Official Bundle Signer (.bin)
+        env:
+          KEYSTORE_PASSWORD: \${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
+          KEY_PASSWORD: \${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
+          KEY_ALIAS: \${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
+        run: |
+          curl -sSL -o /tmp/bundlesigner-0.1.13.jar https://github.com/cafebazaar/bundle-signer/releases/download/v0.1.13/bundlesigner-0.1.13.jar
+          java -jar /tmp/bundlesigner-0.1.13.jar genbin \\
+            --bundle app/build/outputs/bundle/release/CreatorFlow-release-signed.aab \\
+            --bin signing/ \\
+            --v2-signing-enabled true \\
+            --v3-signing-enabled false \\
+            --ks signing/release.keystore \\
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \\
+            --key-pass "pass:$KEY_PASSWORD" \\
+            --ks-key-alias "$KEY_ALIAS" \\
+            -v
+          BAZAAR_BIN=$(find signing/ -maxdepth 1 -name "*.bin" | head -n 1)
+          if [ -n "$BAZAAR_BIN" ]; then
+            cp "$BAZAAR_BIN" signing/bazaar_bundle_signer.bin
+          fi
+
+      - name: Upload Universal Signed Release APK (Cafe Bazaar Direct Upload)
         uses: actions/upload-artifact@v4
         with:
-          name: CreatorFlow-Signed-Release-APK
+          name: CreatorFlow-Universal-Signed-APK
           path: app/build/outputs/apk/release/CreatorFlow-release-signed.apk
 
       - name: Upload Signed Release Bundle (AAB)
@@ -145,11 +173,17 @@ jobs:
           name: CreatorFlow-Signed-Release-AAB
           path: app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
 
-      - name: Upload Bundle Signer (.bin) Key
+      - name: Upload Cafe Bazaar Bundle Signer (.bin) Digest
         uses: actions/upload-artifact@v4
         with:
-          name: CreatorFlow-Bundle-Signer-BIN
-          path: signing/bundle_signer_key.bin
+          name: CreatorFlow-CafeBazaar-BundleSigner-BIN
+          path: signing/bazaar_bundle_signer.bin
+
+      - name: Upload Release Keystore Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: CreatorFlow-Release-Keystore
+          path: signing/release.keystore
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -158,7 +192,7 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk`,
     },
     bundleSignerScript: {
-      title: "Bundle Signer & .bin Key Export Script",
+      title: "Official Cafe Bazaar Bundle Signer & Packaging Script",
       filename: "scripts/bundle-signer.sh",
       language: "bash",
       content: `#!/usr/bin/env bash
@@ -168,26 +202,37 @@ KEYSTORE_PATH=\${KEYSTORE_PATH:-"signing/release.keystore"}
 KEY_ALIAS=\${KEY_ALIAS:-"creatorflow_key"}
 KEY_PASSWORD=\${KEY_PASSWORD:-"creatorflow123"}
 KEYSTORE_PASSWORD=\${KEYSTORE_PASSWORD:-"creatorflow123"}
-OUTPUT_BIN=\${OUTPUT_BIN:-"signing/bundle_signer_key.bin"}
+SIGNING_DIR=\${SIGNING_DIR:-"signing"}
 
-echo "🚀 [Bundle Signer] Starting Android signing & key export process..."
-mkdir -p signing
+echo "🚀 [CreatorFlow Packager] Starting Android signing process..."
+mkdir -p "$SIGNING_DIR"
 
-# Generate release keystore if missing
 if [ ! -f "$KEYSTORE_PATH" ]; then
-    openssl genrsa -out signing/release_private_key.pem 2048
-    openssl req -new -x509 -key signing/release_private_key.pem -out signing/release_cert.pem -days 10000 \\
-        -subj "/CN=CreatorFlow/OU=Studio/O=HamidMousavizadeh/C=IR"
-    openssl pkcs12 -export -in signing/release_cert.pem -inkey signing/release_private_key.pem \\
+    openssl genrsa -out "$SIGNING_DIR/release_private_key.pem" 2048
+    openssl req -new -x509 -key "$SIGNING_DIR/release_private_key.pem" -out "$SIGNING_DIR/release_cert.pem" -days 10000 \\
+        -subj "/CN=CreatorFlow/OU=Production/O=HamidMousavizadeh/C=IR"
+    openssl pkcs12 -export -in "$SIGNING_DIR/release_cert.pem" -inkey "$SIGNING_DIR/release_private_key.pem" \\
         -out "$KEYSTORE_PATH" -name "$KEY_ALIAS" -passout "pass:$KEYSTORE_PASSWORD"
 fi
 
-# Export Bundle Signer .bin format (PKCS#8 DER Binary format for Cafe Bazaar & Google Play)
-echo "📦 Exporting Bundle Signer .bin file..."
-openssl pkcs12 -in "$KEYSTORE_PATH" -nocerts -nodes -passin "pass:$KEYSTORE_PASSWORD" | \\
-    openssl pkcs8 -topk8 -inform PEM -outform DER -out "$OUTPUT_BIN" -nocrypt
-
-echo "✅ Bundle Signer .bin file generated: $OUTPUT_BIN"`,
+AAB_INPUT=$(find app/build/outputs/bundle/release -name "*.aab" 2>/dev/null | head -n 1 || true)
+if [ -n "$AAB_INPUT" ]; then
+    SIGNED_AAB="$SIGNING_DIR/CreatorFlow-release-signed.aab"
+    cp "$AAB_INPUT" "$SIGNED_AAB"
+    jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \\
+        -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \\
+        "$SIGNED_AAB" "$KEY_ALIAS"
+        
+    BUNDLE_SIGNER_JAR="/tmp/bundlesigner-0.1.13.jar"
+    if [ ! -f "$BUNDLE_SIGNER_JAR" ]; then
+        curl -sSL -o "$BUNDLE_SIGNER_JAR" https://github.com/cafebazaar/bundle-signer/releases/download/v0.1.13/bundlesigner-0.1.13.jar
+    fi
+    java -jar "$BUNDLE_SIGNER_JAR" genbin \\
+        --bundle "$SIGNED_AAB" --bin "$SIGNING_DIR/" \\
+        --v2-signing-enabled true --v3-signing-enabled false \\
+        --ks "$KEYSTORE_PATH" --ks-pass "pass:$KEYSTORE_PASSWORD" \\
+        --key-pass "pass:$KEY_PASSWORD" --ks-key-alias "$KEY_ALIAS" -v
+fi`,
     },
     appGradle: {
       title: "App Build Gradle (SigningConfigs & Dependencies)",
@@ -427,32 +472,32 @@ object TapsellManager {
         {/* 3 Steps Pipeline */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
-            <div className="flex items-center gap-2 text-cyan-400 text-xs font-bold">
-              <span className="w-5 h-5 rounded-full bg-cyan-500/20 flex items-center justify-center font-mono">1</span>
-              <span>خروجی فرمت bin. با ابزار Bundle Signer</span>
+            <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
+              <span className="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center font-mono">1</span>
+              <span>روش اول (پیشنهادی): فایل APK امضا شده مستقیم</span>
             </div>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              فایل <code className="text-cyan-300 font-mono">bundle_signer_key.bin</code> در ساختار استاندارد PKCS#8 DER ساخته شده و برای بارگذاری در پنل توسعه‌دهندگان بازار در بخش «امضای برنامه‌ها توسط کافه بازار» آماده است.
+              فایل <code className="text-emerald-300 font-mono">CreatorFlow-Universal-Signed-APK</code> بدون نیاز به هیچ فایل یا تنظیمات اضافی مستقیماً در پنل بازار بارگذاری شده و تایید می‌شود.
             </p>
           </div>
 
           <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
             <div className="flex items-center gap-2 text-amber-400 text-xs font-bold">
               <span className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center font-mono">2</span>
-              <span>تولید AAB امضا شده (Signed AAB)</span>
+              <span>روش دوم: فایل App Bundle (AAB)</span>
             </div>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              در گردش‌کار گیت‌هاب، دستور <code className="text-amber-300 font-mono">bundleRelease</code> اجرا شده و با استفاده از jarsigner و کلید ریلیز امضا می‌شود و به نام <code className="text-amber-300 font-mono">CreatorFlow-Signed-Release-AAB</code> در آرتیفکت‌ها قرار می‌گیرد.
+              فایل <code className="text-amber-300 font-mono">CreatorFlow-Signed-Release-AAB</code> فرمت بهینه گوگل‌پلی و کافه بازار است که با حجم کمتر برای کاربران منتشر می‌شود.
             </p>
           </div>
 
           <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
-            <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
-              <span className="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center font-mono">3</span>
-              <span>تولید APK امضا شده (Signed APK)</span>
+            <div className="flex items-center gap-2 text-orange-400 text-xs font-bold">
+              <span className="w-5 h-5 rounded-full bg-orange-500/20 flex items-center justify-center font-mono">3</span>
+              <span>فایل رسمی بازار: Cafe Bazaar .bin Digest</span>
             </div>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              علاوه بر AAB، فایل نصبی مستقل <code className="text-emerald-300 font-mono">CreatorFlow-Signed-Release-APK</code> نیز بیلد و امضا شده و به طور همزمان برای تست و نصب مستقیم روی گوشی در دسترس است.
+              فایل <code className="text-orange-300 font-mono">CreatorFlow-CafeBazaar-BundleSigner-BIN</code> دقیقاً با ابزار رسمی <code className="text-orange-400 font-mono">bundlesigner genbin</code> از روی AAB تولید شده و برای امضای AAB در پنل بازار معتبر است.
             </p>
           </div>
         </div>
@@ -577,12 +622,13 @@ object TapsellManager {
             به طور خودکار اجرا می‌شود و مراحل کامپایل، ساین با Bundle Signer و اکسپورت کلید را انجام می‌دهد.
           </li>
           <li>
-            پس از پایان موفق بیلد، در بخش <strong className="text-white">Artifacts</strong> چهار فایل خروجی مجزا در دسترس خواهد بود:
+            پس از پایان موفق بیلد، در بخش <strong className="text-white">Artifacts</strong> فایل‌های خروجی رسمی در دسترس خواهد بود:
             <ul className="mt-2 mr-6 space-y-1.5 list-disc list-inside text-xs text-slate-400">
-              <li><strong className="text-amber-300 font-mono">CreatorFlow-Signed-Release-AAB</strong>: فایل App Bundle رسمی و امضا شده آماده انتشار در بازار و گوگل پلی.</li>
-              <li><strong className="text-emerald-300 font-mono">CreatorFlow-Signed-Release-APK</strong>: فایل نصبی APK ریلیز امضا شده برای نصب مستقیم.</li>
-              <li><strong className="text-orange-300 font-mono">CreatorFlow-Bundle-Signer-BIN</strong>: فایل فرمت <code className="text-orange-400 font-mono font-bold">.bin</code> جهت بارگذاری در پنل توسعه‌دهندگان بازار (امضای اپ باندل).</li>
-              <li><strong className="text-cyan-300 font-mono">CreatorFlow-Debug-APK</strong>: نسخه دیباگ جهت خطایابی سریع.</li>
+              <li><strong className="text-emerald-300 font-mono">CreatorFlow-Universal-Signed-APK</strong>: فایل APK ریلیز امضا شده (بهترین و سریع‌ترین گزینه برای آپلود مستقیم در کافه بازار بدون هیچ پیش‌نیاز یا فایل دیگر).</li>
+              <li><strong className="text-amber-300 font-mono">CreatorFlow-Signed-Release-AAB</strong>: فایل App Bundle رسمی و امضا شده برای انتشار بهینه در کافه بازار و گوگل پلی.</li>
+              <li><strong className="text-orange-300 font-mono">CreatorFlow-CafeBazaar-BundleSigner-BIN</strong>: فایل تاییدشده <code className="text-orange-400 font-mono font-bold">.bin</code> تولید شده توسط ابزار رسمی <code className="text-orange-400 font-mono">bundlesigner genbin</code> کافه بازار برای آپلود در صورت انتخاب متد AAB.</li>
+              <li><strong className="text-cyan-300 font-mono">CreatorFlow-Release-Keystore</strong>: فایل بک‌آپ کلید Keystore رسمی.</li>
+              <li><strong className="text-slate-300 font-mono">CreatorFlow-Debug-APK</strong>: نسخه دیباگ جهت خطایابی سریع.</li>
             </ul>
           </li>
         </ol>

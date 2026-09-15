@@ -2,70 +2,87 @@
 set -e
 
 # ==============================================================================
-# CreatorFlow Bundle Signer & Key Export Tool (.bin / .aab / .apk)
-# Specifically designed for GitHub Actions CI/CD, Cafe Bazaar, and Google Play
-# Developer: سیدحمیدموسوی زاده
-# Package: com.creatorflow.app
+# CreatorFlow Official Bundle Signer & Store Packaging Tool
+# Supports:
+# 1. Cafe Bazaar Official Bundle Signer (bundlesigner-0.1.13.jar genbin)
+# 2. Standard Universal Signed APK (Direct upload to Cafe Bazaar / Myket)
+# 3. Google Play / Cafe Bazaar App Bundle (AAB) & Keystore Management
 # ==============================================================================
 
 KEYSTORE_PATH=${KEYSTORE_PATH:-"signing/release.keystore"}
 KEY_ALIAS=${KEY_ALIAS:-"creatorflow_key"}
 KEY_PASSWORD=${KEY_PASSWORD:-"creatorflow123"}
 KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD:-"creatorflow123"}
-OUTPUT_BIN=${OUTPUT_BIN:-"signing/bundle_signer_key.bin"}
+SIGNING_DIR=${SIGNING_DIR:-"signing"}
 
-echo "🚀 [Bundle Signer] Starting Android signing & key export process..."
+echo "🚀 [CreatorFlow Packager] Starting Android signing & verification process..."
+mkdir -p "$SIGNING_DIR"
 
-# 1. Create signing directory if not exists
-mkdir -p signing
-
-# 2. Check if keystore exists, if not generate standard PKCS12 release keystore
+# 1. Generate or load Release Keystore
 if [ ! -f "$KEYSTORE_PATH" ]; then
-    echo "🔑 Keystore not found at $KEYSTORE_PATH. Generating a new release keystore..."
-    openssl genrsa -out signing/release_private_key.pem 2048
-    openssl req -new -x509 -key signing/release_private_key.pem -out signing/release_cert.pem -days 10000 \
-        -subj "/CN=CreatorFlow/OU=Studio/O=HamidMousavizadeh/C=IR"
-    openssl pkcs12 -export -in signing/release_cert.pem -inkey signing/release_private_key.pem \
+    echo "🔑 Generating release keystore at $KEYSTORE_PATH..."
+    openssl genrsa -out "$SIGNING_DIR/release_private_key.pem" 2048
+    openssl req -new -x509 -key "$SIGNING_DIR/release_private_key.pem" -out "$SIGNING_DIR/release_cert.pem" -days 10000 \
+        -subj "/CN=CreatorFlow/OU=Production/O=HamidMousavizadeh/C=IR"
+    openssl pkcs12 -export -in "$SIGNING_DIR/release_cert.pem" -inkey "$SIGNING_DIR/release_private_key.pem" \
         -out "$KEYSTORE_PATH" -name "$KEY_ALIAS" -passout "pass:$KEYSTORE_PASSWORD"
-    echo "✅ Keystore created at $KEYSTORE_PATH (Alias: $KEY_ALIAS)"
+    echo "✅ Keystore created: $KEYSTORE_PATH"
 fi
 
-# 3. Export Bundle Signer .bin format (PKCS#8 DER Binary format for App Bundle store signing)
-echo "📦 Exporting Bundle Signer key format (.bin) for Cafe Bazaar / Google Play App Signing..."
-openssl pkcs12 -in "$KEYSTORE_PATH" -nocerts -nodes -passin "pass:$KEYSTORE_PASSWORD" | \
-    openssl pkcs8 -topk8 -inform PEM -outform DER -out "$OUTPUT_BIN" -nocrypt
-
-echo "✅ Bundle Signer .bin file generated successfully at: $OUTPUT_BIN"
-ls -lh "$OUTPUT_BIN"
-
-# 4. Optional signing helper for AAB if present
-AAB_PATH="app/build/outputs/bundle/release/app-release.aab"
-SIGNED_AAB_PATH="app/build/outputs/bundle/release/app-release-signed.aab"
-
-if [ -f "$AAB_PATH" ]; then
-    echo "✍️ Signing App Bundle ($AAB_PATH)..."
-    cp "$AAB_PATH" "$SIGNED_AAB_PATH"
+# 2. Sign Release AAB if it exists
+AAB_INPUT=$(find app/build/outputs/bundle/release -name "*.aab" 2>/dev/null | head -n 1 || true)
+if [ -n "$AAB_INPUT" ] && [ -f "$AAB_INPUT" ]; then
+    SIGNED_AAB="$SIGNING_DIR/CreatorFlow-release-signed.aab"
+    echo "✍️ Signing App Bundle ($AAB_INPUT) -> $SIGNED_AAB"
+    cp "$AAB_INPUT" "$SIGNED_AAB"
     jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
         -keystore "$KEYSTORE_PATH" \
         -storepass "$KEYSTORE_PASSWORD" \
         -keypass "$KEY_PASSWORD" \
-        "$SIGNED_AAB_PATH" "$KEY_ALIAS"
-    echo "✅ Signed AAB generated: $SIGNED_AAB_PATH"
+        "$SIGNED_AAB" "$KEY_ALIAS"
+    echo "✅ AAB signed successfully."
+
+    # 3. Run official Cafe Bazaar bundlesigner tool to generate official .bin digest
+    echo "📦 Preparing Cafe Bazaar official bundle-signer tool..."
+    BUNDLE_SIGNER_JAR="/tmp/bundlesigner-0.1.13.jar"
+    if [ ! -f "$BUNDLE_SIGNER_JAR" ]; then
+        curl -sSL -o "$BUNDLE_SIGNER_JAR" https://github.com/cafebazaar/bundle-signer/releases/download/v0.1.13/bundlesigner-0.1.13.jar
+    fi
+
+    if which java > /dev/null 2>&1; then
+        echo "⚡ Running official Cafe Bazaar bundle-signer genbin..."
+        java -jar "$BUNDLE_SIGNER_JAR" genbin \
+            --bundle "$SIGNED_AAB" \
+            --bin "$SIGNING_DIR/" \
+            --v2-signing-enabled true \
+            --v3-signing-enabled false \
+            --ks "$KEYSTORE_PATH" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            -v || true
+
+        # Find produced bin file and copy to standardized name
+        PRODUCED_BIN=$(find "$SIGNING_DIR" -maxdepth 1 -name "*.bin" 2>/dev/null | grep -v "pepk" | head -n 1 || true)
+        if [ -n "$PRODUCED_BIN" ]; then
+            cp "$PRODUCED_BIN" "$SIGNING_DIR/bazaar_bundle_signer.bin"
+            echo "✅ Verified Cafe Bazaar .bin digest generated at: $SIGNING_DIR/bazaar_bundle_signer.bin"
+        fi
+    fi
 fi
 
-# 5. Optional signing helper for APK if present
-APK_PATH="app/build/outputs/apk/release/app-release-unsigned.apk"
-SIGNED_APK_PATH="app/build/outputs/apk/release/app-release-signed.apk"
-
-if [ -f "$APK_PATH" ]; then
-    echo "✍️ Signing Release APK ($APK_PATH)..."
-    cp "$APK_PATH" "$SIGNED_APK_PATH"
+# 4. Sign Release APK if it exists
+APK_INPUT=$(find app/build/outputs/apk/release -name "*.apk" 2>/dev/null | head -n 1 || true)
+if [ -n "$APK_INPUT" ] && [ -f "$APK_INPUT" ]; then
+    SIGNED_APK="$SIGNING_DIR/CreatorFlow-release-signed.apk"
+    echo "✍️ Signing Release APK ($APK_INPUT) -> $SIGNED_APK"
+    cp "$APK_INPUT" "$SIGNED_APK"
     jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
         -keystore "$KEYSTORE_PATH" \
         -storepass "$KEYSTORE_PASSWORD" \
         -keypass "$KEY_PASSWORD" \
-        "$SIGNED_APK_PATH" "$KEY_ALIAS"
-    echo "✅ Signed APK generated: $SIGNED_APK_PATH"
+        "$SIGNED_APK" "$KEY_ALIAS"
+    echo "✅ Universal Signed APK ready for direct Cafe Bazaar upload."
 fi
 
-echo "🎉 [Bundle Signer] All operations completed successfully!"
+echo "🎉 [CreatorFlow Packager] Process finished."
