@@ -27,152 +27,209 @@ jobs:
         run: |
           mkdir -p gradle/wrapper
           if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ] || [ ! -s "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "📥 gradle-wrapper.jar not found or empty. Downloading official Gradle Wrapper JAR..."
-            curl -sSL -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradle/wrapper/gradle-wrapper.jar
+            curl -sSL -o gradle/wrapper/gradle-wrapper.jar \
+            https://raw.githubusercontent.com/gradle/gradle/v8.9.0/gradle/wrapper/gradle-wrapper.jar
           fi
           ls -lh gradle/wrapper/gradle-wrapper.jar
 
-      - name: Grant Execute Permission to Gradlew & Scripts
+      - name: Grant Execute Permission
         run: |
           chmod +x gradlew
-          chmod +x scripts/bundle-signer.sh
+          chmod +x scripts/bundle-signer.sh || true
 
-      - name: Validate and Ensure Proper PNG Icon Resources
+      - name: Validate PNG Resources
         run: |
-          # AAPT2 requires all .png files to have valid PNG header format
           for img in app/src/main/res/mipmap-*/*.png; do
             if [ -f "$img" ]; then
-              file "$img" | grep -q "PNG image data" || (which convert && convert "$img" "PNG32:$img") || true
+              file "$img"
             fi
           done
-          file app/src/main/res/mipmap-*/*.png
 
       - name: Prepare Release Keystore
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
         run: |
           mkdir -p signing
-          # If secret base64 keystore is provided in GitHub Secrets, decode it
-          if [ -n "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > signing/release.keystore
-          elif [ ! -f "signing/release.keystore" ]; then
-            echo "🔑 Generating default release keystore..."
-            openssl genrsa -out signing/release_private_key.pem 2048
-            openssl req -new -x509 -key signing/release_private_key.pem -out signing/release_cert.pem -days 10000 \
-              -subj "/CN=CreatorFlow/OU=Production/O=HamidMousavizadeh/C=IR"
-            openssl pkcs12 -export -in signing/release_cert.pem -inkey signing/release_private_key.pem \
-              -out signing/release.keystore -name "$KEY_ALIAS" -passout "pass:$KEYSTORE_PASSWORD"
+
+          if [ ! -f signing/release.keystore ]; then
+            keytool -genkeypair \
+              -v \
+              -keystore signing/release.keystore \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEYSTORE_PASSWORD" \
+              -dname "CN=CreatorFlow"
           fi
-          ls -la signing/release.keystore
+
+          ls -lh signing/release.keystore
 
       - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace
+        run: |
+          ./gradlew assembleRelease --stacktrace
 
-      - name: Build Release Bundle (AAB)
-        run: ./gradlew bundleRelease --stacktrace
+      - name: Build Release Bundle
+        run: |
+          ./gradlew bundleRelease --stacktrace
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: |
+          ./gradlew assembleDebug --stacktrace
 
-      - name: Sign APK and AAB with Keystore
+      - name: Sign Release Files
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
         run: |
-          # Sign Release AAB
-          if [ -f "app/build/outputs/bundle/release/app-release.aab" ]; then
-            cp app/build/outputs/bundle/release/app-release.aab app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
-            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-              -keystore signing/release.keystore \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -keypass "$KEY_PASSWORD" \
-              app/build/outputs/bundle/release/CreatorFlow-release-signed.aab "$KEY_ALIAS"
-            echo "✅ Signed AAB produced at app/build/outputs/bundle/release/CreatorFlow-release-signed.aab"
-          fi
+          mkdir -p app/build/outputs/bundle/release
+          mkdir -p app/build/outputs/apk/release
 
-          # Sign Release APK (Universal APK for Cafe Bazaar, Myket & Direct Install)
-          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
-          if [ -n "$APK_FILE" ]; then
-            cp "$APK_FILE" app/build/outputs/apk/release/CreatorFlow-release-signed.apk
-            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-              -keystore signing/release.keystore \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -keypass "$KEY_PASSWORD" \
-              app/build/outputs/apk/release/CreatorFlow-release-signed.apk "$KEY_ALIAS"
-            echo "✅ Signed Release APK produced at app/build/outputs/apk/release/CreatorFlow-release-signed.apk"
-          fi
+          cp app/build/outputs/bundle/release/app-release.aab \
+          app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
 
-      - name: Generate Cafe Bazaar Official Bundle Signer (.bin)
+          jarsigner \
+          -verbose \
+          -sigalg SHA256withRSA \
+          -digestalg SHA-256 \
+          -keystore signing/release.keystore \
+          -storepass "$KEYSTORE_PASSWORD" \
+          -keypass "$KEY_PASSWORD" \
+          app/build/outputs/bundle/release/CreatorFlow-release-signed.aab \
+          "$KEY_ALIAS"
+
+          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n1)
+
+          cp "$APK_FILE" app/build/outputs/apk/release/CreatorFlow-release-signed.apk
+
+          jarsigner \
+          -verbose \
+          -sigalg SHA256withRSA \
+          -digestalg SHA-256 \
+          -keystore signing/release.keystore \
+          -storepass "$KEYSTORE_PASSWORD" \
+          -keypass "$KEY_PASSWORD" \
+          app/build/outputs/apk/release/CreatorFlow-release-signed.apk \
+          "$KEY_ALIAS"
+                - name: Generate Cafe Bazaar Bundle Signer BIN
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
         run: |
-          echo "📥 Downloading official Cafe Bazaar bundle-signer tool..."
-          curl -sSL -o /tmp/bundlesigner-0.1.13.jar https://github.com/cafebazaar/bundle-signer/releases/download/v0.1.13/bundlesigner-0.1.13.jar
-          
-          echo "⚡ Executing Cafe Bazaar genbin command on signed AAB..."
-          java -jar /tmp/bundlesigner-0.1.13.jar genbin \
+          set -e
+
+          mkdir -p signing
+
+          echo "📥 Finding Cafe Bazaar Bundle Signer..."
+
+          RELEASE_JSON=$(curl -s https://api.github.com/repos/cafebazaar/bundle-signer/releases/latest)
+
+          DOWNLOAD_URL=$(echo "$RELEASE_JSON" | \
+          grep browser_download_url | \
+          grep -E "\.jar" | \
+          head -n 1 | \
+          cut -d '"' -f 4)
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "❌ Could not find Bundle Signer JAR"
+            exit 1
+          fi
+
+          echo "Downloading:"
+          echo "$DOWNLOAD_URL"
+
+          curl -fL "$DOWNLOAD_URL" \
+          -o /tmp/bundlesigner.jar
+
+          echo "Checking JAR..."
+
+          file /tmp/bundlesigner.jar
+
+          if ! file /tmp/bundlesigner.jar | grep -qi "Java archive"; then
+            echo "❌ Invalid JAR file"
+            exit 1
+          fi
+
+
+          echo "⚡ Creating Cafe Bazaar BIN..."
+
+          java -jar /tmp/bundlesigner.jar genbin \
             --bundle app/build/outputs/bundle/release/CreatorFlow-release-signed.aab \
-            --bin signing/ \
-            --v2-signing-enabled true \
-            --v3-signing-enabled false \
+            --bin signing \
             --ks signing/release.keystore \
             --ks-pass "pass:$KEYSTORE_PASSWORD" \
             --key-pass "pass:$KEY_PASSWORD" \
-            --ks-key-alias "$KEY_ALIAS" \
-            -v
+            --ks-key-alias "$KEY_ALIAS"
 
-          echo "🔍 Scanning produced Cafe Bazaar files in signing/:"
-          ls -la signing/
-          
-          # Find and standardize the Cafe Bazaar bin file name
-          BAZAAR_BIN=$(find signing/ -maxdepth 1 -name "*.bin" | head -n 1)
-          if [ -n "$BAZAAR_BIN" ]; then
-            cp "$BAZAAR_BIN" signing/bazaar_bundle_signer.bin
-            echo "✅ Verified Cafe Bazaar .bin digest generated: signing/bazaar_bundle_signer.bin"
-            ls -lh signing/bazaar_bundle_signer.bin
+
+          BAZAAR_BIN=$(find signing -name "*.bin" | head -n1)
+
+
+          if [ -z "$BAZAAR_BIN" ]; then
+            echo "❌ BIN was not created"
+            exit 1
           fi
 
-          # Also export PKCS#8 DER format for Google Play App Signing / PEPK
-          openssl pkcs12 -in signing/release.keystore -nocerts -nodes -passin "pass:$KEYSTORE_PASSWORD" | \
-            openssl pkcs8 -topk8 -inform PEM -outform DER -out signing/google_play_pepk_key.bin -nocrypt || true
 
-      - name: Upload Universal Signed Release APK (Cafe Bazaar Direct Upload)
+          cp "$BAZAAR_BIN" signing/bazaar_bundle_signer.bin
+
+
+          SIZE=$(stat -c%s signing/bazaar_bundle_signer.bin)
+
+          echo "BIN SIZE:"
+          echo "$SIZE bytes"
+
+
+          if [ "$SIZE" -lt 10000 ]; then
+            echo "❌ BIN size is invalid"
+            exit 1
+          fi
+
+
+          echo "✅ Cafe Bazaar BIN generated"
+          ls -lh signing/bazaar_bundle_signer.bin
+
+
+
+      - name: Upload Universal Signed APK
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-Universal-Signed-APK
           path: app/build/outputs/apk/release/CreatorFlow-release-signed.apk
-          if-no-files-found: warn
+          if-no-files-found: error
 
-      - name: Upload Signed Release Bundle (AAB)
+
+      - name: Upload Signed AAB
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-Signed-Release-AAB
           path: app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
-          if-no-files-found: warn
+          if-no-files-found: error
 
-      - name: Upload Cafe Bazaar Bundle Signer (.bin) Digest
+
+      - name: Upload Cafe Bazaar Bundle Signer BIN
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-CafeBazaar-BundleSigner-BIN
           path: signing/bazaar_bundle_signer.bin
-          if-no-files-found: warn
+          if-no-files-found: error
+
 
       - name: Upload Release Keystore Backup
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-Release-Keystore
           path: signing/release.keystore
-          if-no-files-found: warn
+          if-no-files-found: error
+
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-Debug-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: warn
-
+          if-no-files-found: error
