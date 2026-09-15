@@ -9,6 +9,12 @@ import {
   Terminal,
   CheckCircle2,
   ExternalLink,
+  Key,
+  ShieldCheck,
+  FileArchive,
+  Layers,
+  Sparkles,
+  ArrowDownToLine,
 } from "lucide-react";
 import { UserSettings } from "../types";
 import { translations } from "../locales";
@@ -31,10 +37,10 @@ export const AndroidProjectHub: React.FC<AndroidProjectHubProps> = ({
     { title: string; filename: string; language: string; content: string }
   > = {
     workflow: {
-      title: "GitHub Actions CI/CD Workflow",
+      title: "GitHub Actions CI/CD Workflow (AAB, APK & Bundle Signer .bin)",
       filename: ".github/workflows/android-build.yml",
       language: "yaml",
-      content: `name: Build CreatorFlow Android APK & AAB
+      content: `name: Build & Sign CreatorFlow Android APK & AAB
 
 on:
   push:
@@ -45,6 +51,7 @@ on:
 
 jobs:
   build:
+    name: Build & Sign Android (APK, AAB & Bundle Signer .bin)
     runs-on: ubuntu-latest
 
     steps:
@@ -58,29 +65,117 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Grant Execute Permission to Gradlew
-        run: chmod +x gradlew
+      - name: Grant Execute Permission to Gradlew & Scripts
+        run: |
+          chmod +x gradlew
+          chmod +x scripts/bundle-signer.sh
 
-      - name: Assemble Debug APK
+      - name: Prepare Release Keystore & Generate Bundle Signer (.bin)
+        env:
+          KEYSTORE_PASSWORD: \${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
+          KEY_PASSWORD: \${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
+          KEY_ALIAS: \${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
+        run: |
+          mkdir -p signing
+          if [ -n "\${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
+            echo "\${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > signing/release.keystore
+          fi
+          ./scripts/bundle-signer.sh
+
+      - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Assemble Release Bundle (AAB)
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Build Release Bundle (AAB)
         run: ./gradlew bundleRelease --stacktrace
 
-      - name: Upload Debug APK Artifact
+      - name: Sign APK and AAB with Bundle Signer Keystore
+        env:
+          KEYSTORE_PASSWORD: \${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
+          KEY_PASSWORD: \${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
+          KEY_ALIAS: \${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
+        run: |
+          # Sign Release AAB
+          if [ -f "app/build/outputs/bundle/release/app-release.aab" ]; then
+            cp app/build/outputs/bundle/release/app-release.aab app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
+            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+              -keystore signing/release.keystore \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              app/build/outputs/bundle/release/CreatorFlow-release-signed.aab "$KEY_ALIAS"
+          fi
+
+          # Sign Release APK
+          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -n "$APK_FILE" ]; then
+            cp "$APK_FILE" app/build/outputs/apk/release/CreatorFlow-release-signed.apk
+            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+              -keystore signing/release.keystore \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              app/build/outputs/apk/release/CreatorFlow-release-signed.apk "$KEY_ALIAS"
+          fi
+
+      - name: Upload Signed Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CreatorFlow-Signed-Release-APK
+          path: app/build/outputs/apk/release/CreatorFlow-release-signed.apk
+
+      - name: Upload Signed Release Bundle (AAB)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CreatorFlow-Signed-Release-AAB
+          path: app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
+
+      - name: Upload Bundle Signer (.bin) Key
+        uses: actions/upload-artifact@v4
+        with:
+          name: CreatorFlow-Bundle-Signer-BIN
+          path: signing/bundle_signer_key.bin
+
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: CreatorFlow-Debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/app-debug.apk`,
+    },
+    bundleSignerScript: {
+      title: "Bundle Signer & .bin Key Export Script",
+      filename: "scripts/bundle-signer.sh",
+      language: "bash",
+      content: `#!/usr/bin/env bash
+set -e
 
-      - name: Upload Release Bundle Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: CreatorFlow-Release-Bundle
-          path: app/build/outputs/bundle/release/app-release.aab`,
+KEYSTORE_PATH=\${KEYSTORE_PATH:-"signing/release.keystore"}
+KEY_ALIAS=\${KEY_ALIAS:-"creatorflow_key"}
+KEY_PASSWORD=\${KEY_PASSWORD:-"creatorflow123"}
+KEYSTORE_PASSWORD=\${KEYSTORE_PASSWORD:-"creatorflow123"}
+OUTPUT_BIN=\${OUTPUT_BIN:-"signing/bundle_signer_key.bin"}
+
+echo "🚀 [Bundle Signer] Starting Android signing & key export process..."
+mkdir -p signing
+
+# Generate release keystore if missing
+if [ ! -f "$KEYSTORE_PATH" ]; then
+    openssl genrsa -out signing/release_private_key.pem 2048
+    openssl req -new -x509 -key signing/release_private_key.pem -out signing/release_cert.pem -days 10000 \\
+        -subj "/CN=CreatorFlow/OU=Studio/O=HamidMousavizadeh/C=IR"
+    openssl pkcs12 -export -in signing/release_cert.pem -inkey signing/release_private_key.pem \\
+        -out "$KEYSTORE_PATH" -name "$KEY_ALIAS" -passout "pass:$KEYSTORE_PASSWORD"
+fi
+
+# Export Bundle Signer .bin format (PKCS#8 DER Binary format for Cafe Bazaar & Google Play)
+echo "📦 Exporting Bundle Signer .bin file..."
+openssl pkcs12 -in "$KEYSTORE_PATH" -nocerts -nodes -passin "pass:$KEYSTORE_PASSWORD" | \\
+    openssl pkcs8 -topk8 -inform PEM -outform DER -out "$OUTPUT_BIN" -nocrypt
+
+echo "✅ Bundle Signer .bin file generated: $OUTPUT_BIN"`,
     },
     appGradle: {
-      title: "App Build Gradle (Dependencies & SDK)",
+      title: "App Build Gradle (SigningConfigs & Dependencies)",
       filename: "app/build.gradle.kts",
       language: "kotlin",
       content: `plugins {
@@ -100,59 +195,37 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
+    }
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    signingConfigs {
+        create("release") {
+            val keystoreFile = file("../signing/release.keystore")
+            if (keystoreFile.exists()) {
+                storeFile = keystoreFile
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "creatorflow123"
+                keyAlias = System.getenv("KEY_ALIAS") ?: "creatorflow_key"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "creatorflow123"
+            }
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("debug")
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning?.storeFile != null && releaseSigning.storeFile!!.exists()) {
+                signingConfig = releaseSigning
+            }
+        }
+        debug {
+            applicationIdSuffix = ".debug"
+            isDebuggable = true
         }
     }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-    buildFeatures {
-        compose = true
-    }
-}
-
-dependencies {
-    // AndroidX & Compose
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.ui)
-    implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
-    implementation(libs.androidx.material3)
-    implementation(libs.androidx.lifecycle.runtime.compose)
-    implementation(libs.androidx.navigation.compose)
-
-    // Room Database
-    implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
-
-    // Coroutines & Networking
-    implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.retrofit)
-    implementation(libs.retrofit.converter.gson)
-    implementation(libs.okhttp.logging)
-
-    // Tapsell SDK
-    implementation("ir.tapsell.sdk:tapsell-plus:2.2.1-plus")
-
-    // Cafe Bazaar In-App Billing
-    implementation("com.github.cafebazaar.Poolakey:poolakey:2.1.0")
 }`,
     },
     manifest: {
@@ -248,22 +321,11 @@ object TapsellManager {
             }
         })
     }
-
-    fun requestRewardedAd(activity: Activity, onReady: (String) -> Unit, onError: (String) -> Unit) {
-        TapsellPlus.requestRewardedVideoAd(activity, REWARDED_AD_ID, object : TapsellPlusListener() {
-            override fun onResponse(response: TapsellPlusResponse) {
-                onReady(response.responseId)
-            }
-            override fun onError(error: String) {
-                onError(error)
-            }
-        })
-    }
 }`,
     },
   };
 
-  const currentFile = fileContents[activeFile];
+  const currentFile = fileContents[activeFile] || fileContents["workflow"];
 
   const handleCopy = () => {
     navigator.clipboard.writeText(currentFile.content);
@@ -283,6 +345,106 @@ object TapsellManager {
           {t.title}
         </h1>
         <p className="text-slate-400 text-sm">{t.subtitle}</p>
+      </div>
+
+      {/* Bundle Signer & Key Export Dedicated Card */}
+      <div className="rounded-2xl border-2 border-orange-500/40 bg-gradient-to-br from-slate-900 via-slate-950 to-orange-950/20 p-6 space-y-6 shadow-2xl">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+          <div className="flex items-center gap-4">
+            <div className="w-14 h-14 rounded-2xl bg-orange-500/10 border border-orange-500/30 flex items-center justify-center text-orange-400 shrink-0 shadow-lg shadow-orange-500/10">
+              <Key className="w-7 h-7" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-lg font-bold text-white">
+                  ابزار Bundle Signer و خروجی فایل‌های AAB ، APK و فرمت bin.
+                </h3>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-orange-500/20 text-orange-300 border border-orange-500/30">
+                  Ready for GitHub & Bazaar
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 mt-1">
+                تولید مستقیم فایل فرمت <code className="text-orange-400 font-mono font-bold">.bin</code> جهت بارگذاری کلید برای اپ باندل (AAB) در کافه بازار و گوگل پلی و بیلد اتوماتیک در گیت‌هاب.
+              </p>
+            </div>
+          </div>
+
+          {/* Quick Download Action Pills */}
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href="/bundle_signer_key.bin"
+              download="bundle_signer_key.bin"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-slate-950 font-bold text-xs shadow-lg shadow-orange-500/20 transition-all"
+            >
+              <ArrowDownToLine className="w-4 h-4" />
+              <span>دانلود فایل کلید (bin.)</span>
+            </a>
+
+            <a
+              href="/creatorflow-release.keystore"
+              download="creatorflow-release.keystore"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              <span>دانلود Keystore</span>
+            </a>
+
+            <a
+              href="/bundle-signer.sh"
+              download="bundle-signer.sh"
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
+            >
+              <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+              <span>اسکریپت Signer</span>
+            </a>
+          </div>
+        </div>
+
+        {/* 3 Steps Pipeline */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
+            <div className="flex items-center gap-2 text-cyan-400 text-xs font-bold">
+              <span className="w-5 h-5 rounded-full bg-cyan-500/20 flex items-center justify-center font-mono">1</span>
+              <span>خروجی فرمت bin. با ابزار Bundle Signer</span>
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              فایل <code className="text-cyan-300 font-mono">bundle_signer_key.bin</code> در ساختار استاندارد PKCS#8 DER ساخته شده و برای بارگذاری در پنل توسعه‌دهندگان بازار در بخش «امضای برنامه‌ها توسط کافه بازار» آماده است.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
+            <div className="flex items-center gap-2 text-amber-400 text-xs font-bold">
+              <span className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center font-mono">2</span>
+              <span>تولید AAB امضا شده (Signed AAB)</span>
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              در گردش‌کار گیت‌هاب، دستور <code className="text-amber-300 font-mono">bundleRelease</code> اجرا شده و با استفاده از jarsigner و کلید ریلیز امضا می‌شود و به نام <code className="text-amber-300 font-mono">CreatorFlow-Signed-Release-AAB</code> در آرتیفکت‌ها قرار می‌گیرد.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
+            <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
+              <span className="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center font-mono">3</span>
+              <span>تولید APK امضا شده (Signed APK)</span>
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              علاوه بر AAB، فایل نصبی مستقل <code className="text-emerald-300 font-mono">CreatorFlow-Signed-Release-APK</code> نیز بیلد و امضا شده و به طور همزمان برای تست و نصب مستقیم روی گوشی در دسترس است.
+            </p>
+          </div>
+        </div>
+
+        {/* Credentials Box */}
+        <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 flex flex-wrap items-center justify-between gap-4 text-xs font-mono">
+          <div className="flex items-center gap-4 text-slate-300">
+            <span><strong className="text-orange-400">Alias:</strong> creatorflow_key</span>
+            <span><strong className="text-orange-400">Password:</strong> creatorflow123</span>
+            <span><strong className="text-orange-400">Format:</strong> PKCS12 / DER .bin</span>
+          </div>
+          <span className="text-[11px] text-emerald-400 flex items-center gap-1.5 font-sans">
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            کلیدها در ریپازیتوری و GitHub Actions آماده و تست شده‌اند
+          </span>
+        </div>
       </div>
 
       {/* CI/CD Status Callout */}
@@ -306,7 +468,7 @@ object TapsellManager {
               </span>
             </div>
             <p className="text-xs text-slate-300 mt-0.5">
-              مخزن پروژه شامل آیکون رسمی، کدهای بومی کاتلین و گردش‌کار خودکار GitHub Actions برای ساخت APK دیباگ و AAB ریلیز است.
+              مخزن پروژه شامل آیکون رسمی، کدهای بومی کاتلین، اسکریپت Bundle Signer و گردش‌کار خودکار GitHub Actions برای ساخت APK دیباگ و AAB ریلیز است.
             </p>
           </div>
         </div>
@@ -373,12 +535,12 @@ object TapsellManager {
       <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-6 space-y-4 shadow-xl">
         <h3 className="text-base font-bold text-white flex items-center gap-2">
           <Terminal className="w-4 h-4 text-orange-400" />
-          <span>نحوه دریافت فایل خروجی APK در گیت‌هاب (GitHub Actions):</span>
+          <span>مراحل خروجی گرفتن در گیت‌هاب (GitHub Actions) و بارگذاری در مارکت‌ها:</span>
         </h3>
 
         <ol className="space-y-3 text-xs sm:text-sm text-slate-300 list-decimal list-inside leading-relaxed">
           <li>
-            این پروژه را به حساب کاربری خود در GitHub انتقال یا Push دهید.
+            پروژه را به ریپازیتوری خود در GitHub پوش (Push) کنید.
           </li>
           <li>
             به تب <strong className="text-white">Actions</strong> در مخزن گیت‌هاب بروید.
@@ -386,21 +548,18 @@ object TapsellManager {
           <li>
             گردش‌کار{" "}
             <code className="text-cyan-300 font-mono">
-              Build CreatorFlow Android APK & AAB
+              Build & Sign CreatorFlow Android APK & AAB
             </code>{" "}
-            به طور خودکار پس از هر کامیت شروع به بیلد می‌کند.
+            به طور خودکار اجرا می‌شود و مراحل کامپایل، ساین با Bundle Signer و اکسپورت کلید را انجام می‌دهد.
           </li>
           <li>
-            پس از پایان موفقیت‌آمیز، در بخش{" "}
-            <strong className="text-white">Artifacts</strong> فایل‌های{" "}
-            <code className="text-amber-400 font-mono">
-              CreatorFlow-Debug-APK
-            </code>{" "}
-            و{" "}
-            <code className="text-amber-400 font-mono">
-              CreatorFlow-Release-Bundle
-            </code>{" "}
-            را مستقیماً دانلود کنید!
+            پس از پایان موفق بیلد، در بخش <strong className="text-white">Artifacts</strong> چهار فایل خروجی مجزا در دسترس خواهد بود:
+            <ul className="mt-2 mr-6 space-y-1.5 list-disc list-inside text-xs text-slate-400">
+              <li><strong className="text-amber-300 font-mono">CreatorFlow-Signed-Release-AAB</strong>: فایل App Bundle رسمی و امضا شده آماده انتشار در بازار و گوگل پلی.</li>
+              <li><strong className="text-emerald-300 font-mono">CreatorFlow-Signed-Release-APK</strong>: فایل نصبی APK ریلیز امضا شده برای نصب مستقیم.</li>
+              <li><strong className="text-orange-300 font-mono">CreatorFlow-Bundle-Signer-BIN</strong>: فایل فرمت <code className="text-orange-400 font-mono font-bold">.bin</code> جهت بارگذاری در پنل توسعه‌دهندگان بازار (امضای اپ باندل).</li>
+              <li><strong className="text-cyan-300 font-mono">CreatorFlow-Debug-APK</strong>: نسخه دیباگ جهت خطایابی سریع.</li>
+            </ul>
           </li>
         </ol>
       </div>

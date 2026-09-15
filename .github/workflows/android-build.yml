@@ -1,4 +1,4 @@
-name: Build CreatorFlow Android APK & AAB
+name: Build & Sign CreatorFlow Android APK & AAB
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    name: Build Android APK and AAB
+    name: Build & Sign Android (APK, AAB & Bundle Signer .bin)
     runs-on: ubuntu-latest
 
     steps:
@@ -23,14 +23,85 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Make Gradle Wrapper Executable
-        run: chmod +x gradlew
+      - name: Grant Execute Permission to Gradlew & Scripts
+        run: |
+          chmod +x gradlew
+          chmod +x scripts/bundle-signer.sh
+
+      - name: Prepare Release Keystore & Generate Bundle Signer (.bin)
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
+        run: |
+          mkdir -p signing
+          # If secret base64 keystore is provided in GitHub Secrets, decode it
+          if [ -n "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > signing/release.keystore
+          fi
+          
+          # Run the bundle signer script to ensure keystore and export .bin key format
+          ./scripts/bundle-signer.sh
+          
+          # Verify .bin format generated
+          ls -la signing/bundle_signer_key.bin
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
       - name: Build Release Bundle (AAB)
         run: ./gradlew bundleRelease --stacktrace
+
+      - name: Sign APK and AAB with Bundle Signer Keystore
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'creatorflow123' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'creatorflow_key' }}
+        run: |
+          # Sign AAB
+          if [ -f "app/build/outputs/bundle/release/app-release.aab" ]; then
+            cp app/build/outputs/bundle/release/app-release.aab app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
+            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+              -keystore signing/release.keystore \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              app/build/outputs/bundle/release/CreatorFlow-release-signed.aab "$KEY_ALIAS"
+          fi
+
+          # Sign APK
+          APK_FILE=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -n "$APK_FILE" ]; then
+            cp "$APK_FILE" app/build/outputs/apk/release/CreatorFlow-release-signed.apk
+            jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+              -keystore signing/release.keystore \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              app/build/outputs/apk/release/CreatorFlow-release-signed.apk "$KEY_ALIAS"
+          fi
+
+      - name: Upload Signed Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CreatorFlow-Signed-Release-APK
+          path: app/build/outputs/apk/release/CreatorFlow-release-signed.apk
+          if-no-files-found: warn
+
+      - name: Upload Signed Release Bundle (AAB)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CreatorFlow-Signed-Release-AAB
+          path: app/build/outputs/bundle/release/CreatorFlow-release-signed.aab
+          if-no-files-found: warn
+
+      - name: Upload Bundle Signer (.bin) Key
+        uses: actions/upload-artifact@v4
+        with:
+          name: CreatorFlow-Bundle-Signer-BIN
+          path: signing/bundle_signer_key.bin
+          if-no-files-found: warn
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -39,9 +110,3 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: warn
 
-      - name: Upload Release Bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: CreatorFlow-Release-Bundle
-          path: app/build/outputs/bundle/release/app-release.aab
-          if-no-files-found: warn
