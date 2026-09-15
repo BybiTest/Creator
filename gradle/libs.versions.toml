@@ -11,7 +11,7 @@ room = "2.6.1"
 coroutines = "1.9.0"
 retrofit = "2.11.0"
 okhttp = "4.12.0"
-tapsell = "2.2.1-plus"
+tapsell = "2.3.3"
 poolakey = "2.1.0"
 
 [libraries]
@@ -31,7 +31,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }
 retrofit-converter-gson = { group = "com.squareup.retrofit2", name = "converter-gson", version.ref = "retrofit" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
-tapsell-sdk = { group = "ir.tapsell.sdk", name = "tapsell-plus", version.ref = "tapsell" }
+tapsell-sdk = { group = "ir.tapsell.plus", name = "tapsell-plus-sdk-android", version.ref = "tapsell" }
 poolakey-bazaar = { group = "com.github.cafebazaar.Poolakey", name = "poolakey", version.ref = "poolakey" }
 
 [plugins]
