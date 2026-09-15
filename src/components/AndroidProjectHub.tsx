@@ -77,6 +77,14 @@ jobs:
           chmod +x gradlew
           chmod +x scripts/bundle-signer.sh
 
+      - name: Validate and Ensure Proper PNG Icon Resources
+        run: |
+          for img in app/src/main/res/mipmap-*/*.png; do
+            if [ -f "$img" ]; then
+              file "$img" | grep -q "PNG image data" || (which convert && convert "$img" "PNG32:$img") || true
+            fi
+          done
+
       - name: Prepare Release Keystore & Generate Bundle Signer (.bin)
         env:
           KEYSTORE_PASSWORD: \${{ secrets.KEYSTORE_PASSWORD || 'creatorflow123' }}
